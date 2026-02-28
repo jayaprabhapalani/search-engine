@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+nltk
+scikit-learn
+python-dotenv
+aiohttp
