@@ -25,9 +25,9 @@ def preprocess_stories(stories:list)->list:
     
     return stories 
 
-if __name__=="__main__":
-    sample="Ask HN: Why is Python so popular for Machine Learning?"
-    print(preprocess_text(sample))
+# if __name__=="__main__":
+#     sample="Ask HN: Why is Python so popular for Machine Learning?"
+#     print(preprocess_text(sample))
        
         
     

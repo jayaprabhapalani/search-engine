@@ -51,8 +51,8 @@ async def fetch_all_stories(limit=200,keyword=None):
         return stories    
     
     
-if __name__=="__main__":
-    stories=asyncio.run(fetch_all_stories(limit=10))
-    for s in stories:
-        print(s['title'])    
+# if __name__=="__main__":
+#     stories=asyncio.run(fetch_all_stories(limit=10))
+#     for s in stories:
+#         print(s['title'])    
          
