@@ -10,7 +10,8 @@ BASE_URL=os.getenv("HACKERNEWS_BASE_URL")
 # to get the top 200 ids
 async def fetch_top_story_ids(limit:int=200):
     async with httpx.AsyncClient(timeout=10.0) as client:
-        response= await client.get(f'{BASE_URL}topstories.json')
+        response= await client.get(f'{BASE_URL}topstories.json') 
+        #here fetched data is http -so convert that into json
         data=response.json()
         return data[:limit]
         

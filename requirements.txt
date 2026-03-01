@@ -5,3 +5,8 @@ nltk
 scikit-learn
 python-dotenv
 aiohttp
+sqlalchemy
+asyncpg
+alembic
+psycopg2-binary
+redis
