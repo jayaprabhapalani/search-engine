@@ -14,8 +14,8 @@ def get_redis()->Redis:
     return redis.from_url(REDIS_URL,encoding="utf-8",decode_responses=True)
 
 # Checks if a cached result exists for this query
-async def get_cached_result(redis_client:Redis,query):
-    cache_key=f"search:{query}"
+async def get_cached_result(redis_client:Redis,query,page,page_size):
+    cache_key=f"search:{query}:{page}:{page_size}" 
     
     #check if the data is in cache
     cached_data=await redis_client.get(cache_key)
@@ -27,8 +27,8 @@ async def get_cached_result(redis_client:Redis,query):
     return None
 
 # Stores search results in Redis with an expiry time. 
-async def set_cached_result(redis_client:Redis,query,results,ttl=3600):
-    cache_key=f"search:{query}"
+async def set_cached_result(redis_client:Redis,query,page,page_size,results,ttl=3600):
+    cache_key=f"search:{query}:{page}:{page_size}" 
     
     await redis_client.setex(cache_key,ttl,json.dumps(results))
     return {

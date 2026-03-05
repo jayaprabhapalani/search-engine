@@ -10,7 +10,7 @@ from hn_search.models import Stories
 from sqlalchemy import select
 from hn_search.cache import get_cached_result,get_redis,set_cached_result
 from hn_search.ratelimiter import check_rate_limit
-
+import math
 
 app=FastAPI()
 
@@ -104,12 +104,33 @@ async def post_query(db:AsyncSession=Depends(get_db)):
 
 
 @app.get("/search")
-async def search_query(q:str):
-    cached_result=await get_cached_result(app_state["redis"],q)
+async def search_query(q:str,page:int=1,page_size:int=5):
+    #for pagination
+    top_k=page*page_size
+    
+    cached_result=await get_cached_result(app_state["redis"],q,page,page_size)
     if cached_result:
         return cached_result
     
-    result=hybrid_search(q,app_state["stories"],app_state["vectorizer"],app_state["tfidf_matrix"],app_state["vector_matrix"])
-    await set_cached_result(app_state["redis"],q,result)
+    result=hybrid_search(q,app_state["stories"],app_state["vectorizer"],app_state["tfidf_matrix"],app_state["vector_matrix"],top_k=top_k)
     
-    return result
+    total=len(result)
+    total_pages=math.ceil(total/page_size)
+
+    
+    
+    #for pagination
+    start=(page-1)*page_size
+    end=start+page_size
+    paginated=result[start:end]
+    
+    await set_cached_result(app_state["redis"],q,page,page_size,paginated)
+    
+    return {
+        "results":paginated,
+        "page":page,
+        "page_size":page_size,
+        "total":total,
+        "total_pages":total_pages
+        
+    }

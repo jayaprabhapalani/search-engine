@@ -1,0 +1,17 @@
+page=1, page_size=5
+→ top_k = 1*5 = 5
+→ hybrid_search returns 5 results
+→ slice [0:5] → all 5 results
+→ page 1 done ✅
+
+page=2, page_size=5
+→ top_k = 2*5 = 10
+→ hybrid_search returns 10 results
+→ slice [5:10] → last 5 results
+→ page 2 done ✅
+
+page=3, page_size=5
+→ top_k = 3*5 = 15
+→ hybrid_search returns 15 results
+→ slice [10:15] → last 5 results
+→ page 3 done ✅
