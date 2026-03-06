@@ -1,0 +1,148 @@
+The Big Picture
+A Trie is a tree where each node represents one character. Words are paths from root to a node marked as is_end=True.
+
+TrieNode — the building block
+Every single node in the tree is a TrieNode. It has two things:
+children = {}     → dict of character → TrieNode
+is_end = False    → is this the end of a complete word?
+Think of each node as a room. The room has doors (children) labeled with characters. Each door leads to another room.
+
+Trie — the full tree
+Has one starting point — root. An empty TrieNode. Every operation starts here.
+
+insert("python") — visualized
+START at root (empty room)
+
+char = 'p'
+→ no door labeled 'p' in root
+→ create new room, add door 'p' → new room
+→ walk through door 'p'
+
+char = 'y'
+→ no door labeled 'y' in current room
+→ create new room, add door 'y' → new room
+→ walk through door 'y'
+
+char = 't'
+→ create room, walk through 't'
+
+char = 'h'
+→ create room, walk through 'h'
+
+char = 'o'
+→ create room, walk through 'o'
+
+char = 'n'
+→ create room, walk through 'n'
+
+END of word → mark current room is_end = True ✅
+Now insert "pytorch":
+START at root
+
+char = 'p'
+→ door 'p' ALREADY EXISTS (from python)
+→ just walk through, don't create
+
+char = 'y'
+→ door 'y' ALREADY EXISTS
+→ just walk through
+
+char = 't'
+→ door 't' ALREADY EXISTS
+→ just walk through
+
+char = 'o'
+→ no door 'o' here (python went 'h' not 'o')
+→ create new room, walk through 'o'
+
+char = 'r' → create, walk
+char = 'c' → create, walk
+char = 'h' → create, walk
+
+END → is_end = True ✅
+So the tree looks like:
+root
+ └── p
+      └── y
+           └── t
+                ├── h (from python)
+                │    └── o
+                │         └── n ✅ python
+                └── o (from pytorch)
+                     └── r
+                          └── c
+                               └── h ✅ pytorch
+See how "pyt" is shared? That's the efficiency of Trie.
+
+search("py") — visualized
+START at root
+
+char = 'p'
+→ door 'p' exists → walk through
+
+char = 'y'
+→ door 'y' exists → walk through
+
+END of prefix "py"
+→ now we're at the 'y' node
+→ call _collect_words from here
+
+_collect_words(y_node, "py") — visualized
+at 'y' node
+→ is_end? No → don't add "py"
+→ children has 't'
+
+    recurse into 't' node with prefix "pyt"
+    → is_end? No
+    → children has 'h' and 'o'
+
+        recurse into 'h' node with prefix "pyth"
+        → is_end? No
+        → children has 'o'
+
+            recurse into 'o' node with prefix "pytho"
+            → is_end? No
+            → children has 'n'
+
+                recurse into 'n' node with prefix "python"
+                → is_end? YES → add "python" to results ✅
+                → no children → return ["python"]
+
+        recurse into 'o' node with prefix "pyto"
+        → is_end? No
+        → children has 'r'
+            ... eventually reaches 'h' with prefix "pytorch"
+            → is_end? YES → add "pytorch" ✅
+
+final results = ["python", "pytorch"]
+return ["python", "pytorch"][:10]
+
+How we use it in our search engine:
+When /index runs — we take every word from every story title and insert into Trie:
+"Python decorators explained" 
+→ insert "python", "decorators", "explained"
+
+"PyTorch vs TensorFlow"
+→ insert "pytorch", "vs", "tensorflow"
+When user types "py" in search box:
+GET /autocomplete?q=py
+→ trie.search("py")
+→ ["python", "pytorch"]
+→ show as dropdown suggestions
+
+The complete flow of your three methods:
+insert(word):
+    walk character by character
+    create nodes where missing
+    mark last node is_end=True
+
+_collect_words(node, prefix):
+    if is_end → add prefix to results
+    for each child → recurse with prefix+char
+    return all collected words
+
+search(prefix, limit=10):
+    walk to end of prefix
+    if prefix not found → return []
+    call _collect_words from that node
+    return top 10

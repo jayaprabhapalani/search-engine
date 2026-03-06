@@ -11,6 +11,8 @@ from sqlalchemy import select
 from hn_search.cache import get_cached_result,get_redis,set_cached_result
 from hn_search.ratelimiter import check_rate_limit
 import math
+from hn_search.trie import Trie
+import re
 
 app=FastAPI()
 
@@ -19,11 +21,14 @@ app_state={
     "vectorizer":None,
     "tfidf_matrix":None,
     "vector_matrix":None,
-    "redis":None
+    "redis":None,
+    "trie":None
     
 }
 
-#middlewares
+"""middlewares"""
+
+#rate-limiting implementation
 @app.middleware("http")
 async def rate_limit_middleware(request:Request,call_next):
     ip=request.client.host
@@ -69,7 +74,15 @@ async def startup():
             app_state["vectorizer"]=vectorizer
             app_state["tfidf_matrix"]=tfidf_matrix   
             app_state["vector_matrix"]=build_vector_index(app_state["stories"])
-            
+         
+         #split the title into words ,lowercase it then add each word into trie for autocompletion 
+        trie=Trie() 
+        for story in stories:
+            title=story.title.lower()
+            words=title.split()
+            for word in words:
+                trie.insert(word)
+        app_state["trie"]=trie 
                
         
 
@@ -99,6 +112,15 @@ async def post_query(db:AsyncSession=Depends(get_db)):
     app_state["vectorizer"]=vectorizer 
     app_state["tfidf_matrix"]=tfidf_matrix 
     app_state["vector_matrix"]=build_vector_index(stories)
+    
+    #split the title into words ,lowercase it then add each word into trie for autocompletion
+    trie=Trie() 
+    for story in stories:
+        title=story["title"].lower()
+        words=title.split()
+        for word in words:
+            trie.insert(word)
+    app_state["trie"]=trie        
     
     return {"message":f"Indexed {len(preprocessed_stories)} stories"}
 
@@ -134,3 +156,11 @@ async def search_query(q:str,page:int=1,page_size:int=5):
         "total_pages":total_pages
         
     }
+    
+    
+
+#auto-complete (using trie)
+@app.get("/autocomplete")
+async def autocomplete(q:str):
+    return app_state["trie"].search(q)
+    
