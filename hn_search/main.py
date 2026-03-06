@@ -6,13 +6,16 @@ from hn_search.search import build_index,search,build_vector_index,hybrid_search
 from hn_search.database import engine,Base,SessionLocal
 from sqlalchemy.ext.asyncio import AsyncSession
 from hn_search.database import get_db
-from hn_search.models import Stories
+from hn_search.models import Stories,SearchAnalytics
 from sqlalchemy import select
 from hn_search.cache import get_cached_result,get_redis,set_cached_result
 from hn_search.ratelimiter import check_rate_limit
 import math
 from hn_search.trie import Trie
 import re
+from sqlalchemy import func
+
+
 
 app=FastAPI()
 
@@ -126,7 +129,7 @@ async def post_query(db:AsyncSession=Depends(get_db)):
 
 
 @app.get("/search")
-async def search_query(q:str,page:int=1,page_size:int=5):
+async def search_query(q:str,page:int=1,page_size:int=5,db:AsyncSession=Depends(get_db)):
     #for pagination
     top_k=page*page_size
     
@@ -136,11 +139,15 @@ async def search_query(q:str,page:int=1,page_size:int=5):
     
     result=hybrid_search(q,app_state["stories"],app_state["vectorizer"],app_state["tfidf_matrix"],app_state["vector_matrix"],top_k=top_k)
     
+    #page calculation
     total=len(result)
     total_pages=math.ceil(total/page_size)
-
     
-    
+    #store the searched data and result cnt in search analytics
+    search_analytics=SearchAnalytics(query=q,results_count=total)
+    db.add(search_analytics)
+    await db.commit()
+     
     #for pagination
     start=(page-1)*page_size
     end=start+page_size
@@ -163,4 +170,33 @@ async def search_query(q:str,page:int=1,page_size:int=5):
 @app.get("/autocomplete")
 async def autocomplete(q:str):
     return app_state["trie"].search(q)
+ 
+ 
+# analytics -returns the cnts of the query
+@app.get('/analytics/top-searches')
+async def top_searches(db:AsyncSession=Depends(get_db)):
+    result=await db.execute(
+        select(SearchAnalytics.query,func.count(SearchAnalytics.query).label("count"))
+        .group_by(SearchAnalytics.query)
+        .order_by(func.count(SearchAnalytics.query).desc())
+        .limit(10)
+    )
+    rows=result.all() #eg:rows is a list of tuples like [("python", 45), ("fastapi", 32), ...]
     
+    return [{"query":row[0],"count":row[1]} for row in rows]
+    
+
+# to get the zero result searchs
+@app.get('/analytics/zero-searches')
+async def zero_searches(db:AsyncSession=Depends(get_db)):
+    result=await db.execute(
+        select(SearchAnalytics.query,SearchAnalytics.timestamp)
+        .where(SearchAnalytics.results_count==0)
+        .order_by(SearchAnalytics.timestamp.desc())
+        .limit(20)
+    )
+    
+    rows=result.all()
+    
+    return [{"query":row[0],"timestamp":row[1]} for row in rows]
+         
