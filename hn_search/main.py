@@ -15,9 +15,16 @@ from hn_search.trie import Trie
 import re
 from sqlalchemy import func
 from hn_search.tasks import reindex_stories
-
+from fastapi.middleware.cors import CORSMiddleware
 
 app=FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app_state={
     "stories":[],
@@ -30,6 +37,7 @@ app_state={
 }
 
 """middlewares"""
+
 
 #rate-limiting implementation
 @app.middleware("http")
@@ -153,7 +161,12 @@ async def search_query(q:str,page:int=1,page_size:int=5,db:AsyncSession=Depends(
     end=start+page_size
     paginated=result[start:end]
     
-    await set_cached_result(app_state["redis"],q,page,page_size,paginated)
+    await set_cached_result(app_state["redis"],q,page,page_size,{
+        "results": paginated,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total
+    })
     
     return {
         "results":paginated,

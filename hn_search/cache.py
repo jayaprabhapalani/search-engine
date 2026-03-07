@@ -21,7 +21,7 @@ async def get_cached_result(redis_client:Redis,query,page,page_size):
     cached_data=await redis_client.get(cache_key)
     if cached_data:
         return {
-            "result":json.loads(cached_data),
+            "results":json.loads(cached_data),
             "cache":"hit"
         }
     return None

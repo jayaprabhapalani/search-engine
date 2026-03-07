@@ -1,0 +1,83 @@
+@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323:wght@400&display=swap");
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #f5f0e8;
+  --ink: #1a1a2e;
+  --red: #e63946;
+  --yellow: #ffd166;
+  --blue: #457b9d;
+  --teal: #2ec4b6;
+  --white: #fff8f0;
+  --gray: #888;
+  --shadow: 4px 4px 0px #1a1a2e;
+  --shadow-sm: 2px 2px 0px #1a1a2e;
+  --border: 3px solid #1a1a2e;
+}
+
+body {
+  background: var(--bg);
+  font-family: "Press Start 2P", monospace;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #e8e3d8;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ink);
+  border: 2px solid #e8e3d8;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+@keyframes wiggle {
+  0%,
+  100% {
+    transform: rotate(-3deg);
+  }
+  50% {
+    transform: rotate(3deg);
+  }
+}
+@keyframes fadeSlide {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
