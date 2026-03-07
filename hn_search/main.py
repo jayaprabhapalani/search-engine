@@ -14,7 +14,7 @@ import math
 from hn_search.trie import Trie
 import re
 from sqlalchemy import func
-
+from hn_search.tasks import reindex_stories
 
 
 app=FastAPI()
@@ -163,6 +163,12 @@ async def search_query(q:str,page:int=1,page_size:int=5,db:AsyncSession=Depends(
         "total_pages":total_pages
         
     }
+
+
+@app.post("/reindex")
+async def reindex():
+    reindex_stories.delay()
+    return {"message":"Reindexing started in background"}
     
     
 

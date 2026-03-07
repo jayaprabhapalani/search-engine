@@ -31,6 +31,32 @@ services:
     networks:
       - hn_network
 
+  celery_worker:
+    build: .
+    command: celery -A hn_search.celery_app worker --loglevel=info
+    environment:
+      - HACKERNEWS_BASE_URL=https://hacker-news.firebaseio.com/v0/
+      - DATABASE_URL=postgresql+asyncpg://postgres:prabha@postgres:5432/hn_search
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - hn_network
+
+  celery_beat:
+    build: .
+    command: celery -A hn_search.celery_app beat --loglevel=info
+    environment:
+      - HACKERNEWS_BASE_URL=https://hacker-news.firebaseio.com/v0/
+      - DATABASE_URL=postgresql+asyncpg://postgres:prabha@postgres:5432/hn_search
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - hn_network
+
 networks:
   hn_network:
     driver: bridge

@@ -39,3 +39,5 @@ typing_extensions==4.15.0
 uvicorn==0.41.0
 yarl==1.22.0
 sentence-transformers
+celery 
+flower
