@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 from typing import Optional
 
 from hn_search.crawler import fetch_all_stories
-from hn_search.preprocessor import preprocess_stories
+from hn_search.preprocessor import preprocess_stories, preprocess_text
 from hn_search.search import build_index, build_vector_index, hybrid_search
 from hn_search.database import engine, Base, SessionLocal
 from hn_search.database import get_db
@@ -137,7 +137,8 @@ async def startup():
         if stories:
             app_state["stories"] = [
                 {"id": s.id, "title": s.title, "text": s.text,
-                 "preprocessed_text": s.preprocessed_text, "url": s.url, "score": s.score}
+                 "preprocessed_text": preprocess_text(s.text),  # recompute — never stale
+                 "url": s.url, "score": s.score}
                 for s in stories
             ]
 

@@ -1,6 +1,6 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from hn_search.preprocessor import preprocess_stories, preprocess_text
+from hn_search.preprocessor import preprocess_text, tokenize
 from sentence_transformers import SentenceTransformer
 
 MIN_VECTOR_SCORE = 0.30  # drop candidates with no keyword match and vector score below this
@@ -9,7 +9,13 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def build_index(stories: list) -> tuple:
-    vectorizer = TfidfVectorizer()
+    vectorizer = TfidfVectorizer(
+        analyzer="word",
+        tokenizer=lambda t: t.split(),  # trust our tokens — split on whitespace only
+        preprocessor=None,
+        token_pattern=None,
+        lowercase=False,
+    )
     preprocessed_stories = [story["preprocessed_text"] for story in stories]
     tfidf_matrix = vectorizer.fit_transform(preprocessed_stories)
     return (vectorizer, tfidf_matrix)
@@ -21,7 +27,10 @@ def build_vector_index(stories):
 
 
 def search(query, stories, vectorizer, tfidf_matrix, top_k=10) -> list:
-    preprocessed_query = preprocess_text(query)
+    tokens = tokenize(query)
+    if not tokens:          # stopword-only query — skip keyword retrieval
+        return []
+    preprocessed_query = " ".join(tokens)
     query_vector = vectorizer.transform([preprocessed_query])
     scores = cosine_similarity(query_vector, tfidf_matrix)
     top_indices = scores[0].argsort()[::-1][:top_k]

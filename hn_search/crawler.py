@@ -2,6 +2,7 @@ import httpx
 import asyncio
 import os
 from dotenv import load_dotenv
+from hn_search.preprocessor import clean_html
 
 load_dotenv()
 
@@ -26,9 +27,9 @@ async def fetch_single_story(client:httpx.AsyncClient,id):
                 return {
                     "id": data["id"],
                     "title": data["title"],
-                    "text": data["title"]+" "+data.get("text",""),
-                    "url": data.get("url",""),
-                    "score": data["score"],  
+                    "text": data["title"] + " " + clean_html(data.get("text", "")),
+                    "url": data.get("url", ""),
+                    "score": data["score"],
                 }    
     except:
         return None
