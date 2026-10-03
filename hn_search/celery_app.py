@@ -9,9 +9,10 @@ REDIS_URL=os.getenv("REDIS_URL")
 
 #celery instance
 celery_app=Celery(
-    __name__,
+    "hn_search",
     broker=REDIS_URL,
-    backend=REDIS_URL
+    backend=REDIS_URL,
+    include=["hn_search.tasks"],
 )
 
 #beat schedule(for automatic reindexing)
