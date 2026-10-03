@@ -4,7 +4,11 @@ export const searchStories = async (query, page = 1, pageSize = 5) => {
   const res = await fetch(
     `${BASE_URL}/search?q=${encodeURIComponent(query)}&page=${page}&page_size=${pageSize}`,
   );
-  if (!res.ok) throw new Error("Search failed");
+  if (!res.ok) {
+    const err = new Error("Search failed");
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 };
 

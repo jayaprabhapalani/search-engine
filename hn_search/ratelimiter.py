@@ -2,7 +2,9 @@ import time
 import uuid
 
 WINDOW_SIZE_SECONDS=60
-async def check_rate_limit(redis_client,ip,limit=40,window=60)->bool:
+async def check_rate_limit(redis_client, ip, limit=40, window=60) -> bool:
+    if redis_client is None:
+        return True
    
     key=f"rate_limit:{ip}"
     now=time.time()

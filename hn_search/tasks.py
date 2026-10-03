@@ -5,9 +5,10 @@ from hn_search.database import SessionLocal
 from hn_search.models import Stories
 from sqlalchemy import select
 import asyncio
-import redis
 import os
 from dotenv import load_dotenv
+import redis as sync_redis
+from hn_search.cache import REDIS_URL, INDEX_VERSION_KEY
 
 load_dotenv()
 
@@ -28,12 +29,12 @@ async def save_stories_to_db(preprocessed):
                 db.add(new_story)
         await db.commit() 
  
-REDIS_URL=os.getenv("REDIS_URL")                
-                   
-def flush_cache():
-    redis_client=redis.from_url(REDIS_URL,encoding="utf-8",decode_responses=True)
-    redis_client.flushdb()
-    redis_client.close()
+def _bump_index_version_sync() -> None:
+    client = sync_redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+    try:
+        client.incr(INDEX_VERSION_KEY)
+    finally:
+        client.close()
 
 @celery_app.task
 def reindex_stories():
@@ -44,8 +45,8 @@ def reindex_stories():
     #save to DB using asyncio.run()
     asyncio.run(save_stories_to_db(preprocessed))
     
-    #flush redis
-    flush_cache()
+    # invalidate cache without touching rate-limit keys
+    _bump_index_version_sync()
     
     return f"Reindexed {len(preprocessed)} stories"
 

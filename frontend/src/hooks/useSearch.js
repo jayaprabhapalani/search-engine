@@ -1,12 +1,18 @@
 import { useState, useCallback, useRef } from "react";
 import { searchStories } from "../services/api";
 
+const errorMessage = (err) => {
+  if (err?.status === 429) return "Too many requests, slow down!";
+  if (err?.status === 503) return "Index not ready, try again shortly.";
+  return "Search failed. Please try again.";
+};
+
 export const useSearch = () => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
   const [total, setTotal] = useState(0);
   const [capped, setCapped] = useState(false);
   const [displayedQ, setDisplayedQ] = useState("");
@@ -19,16 +25,16 @@ export const useSearch = () => {
     setError("");
     try {
       const data = await searchStories(query, p);
-      if (reqId !== reqCounter.current) return; // stale response — discard
-      setResults(Array.isArray(data.results) ? data.results : []);
-      setPage(data.page ?? 1);
-      setTotalPages(data.total_pages ?? 0);
-      setTotal(data.total ?? 0);
-      setCapped(data.capped ?? false);
-      setDisplayedQ(query);
-    } catch {
       if (reqId !== reqCounter.current) return;
-      setError("Could not connect to backend. Is your server running?");
+      setResults(data.results);
+      setPage(data.page);
+      setTotalPages(data.total_pages);
+      setTotal(data.total);
+      setCapped(data.capped);
+      setDisplayedQ(query);
+    } catch (err) {
+      if (reqId !== reqCounter.current) return;
+      setError(errorMessage(err));
     }
     setLoading(false);
   }, []);
