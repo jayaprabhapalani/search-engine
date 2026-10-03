@@ -34,6 +34,11 @@ export const getZeroResults = async () => {
 
 export const triggerReindex = async () => {
   const res = await fetch(`${BASE_URL}/reindex`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed");
+  if (!res.ok) {
+    const err = new Error("Reindex failed");
+    err.status = res.status;
+    try { err.detail = (await res.json()).detail; } catch {}
+    throw err;
+  }
   return res.json();
 };

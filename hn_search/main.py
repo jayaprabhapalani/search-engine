@@ -2,26 +2,27 @@ import asyncio
 import logging
 import math
 import os
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from hn_search.cache import (
     build_pool_key, bump_index_version, get_cached_pool,
     get_index_version, get_redis, set_cached_pool,
 )
 from hn_search.database import Base, SessionLocal, engine, get_db
-from hn_search.ingest import ingest_stories
 from hn_search.models import SearchAnalytics, Stories
 from hn_search.preprocessor import clean_html, preprocess_text
 from hn_search.ratelimiter import check_rate_limit
 from hn_search.search import build_index, build_vector_index, hybrid_search
-from hn_search.tasks import reindex_stories
 from hn_search.trie import Trie
 from hn_search.utils import normalize_query
 
@@ -36,16 +37,47 @@ DEFAULT_PAGE_SIZE = 5
 MAX_PAGE_SIZE = 20
 MAX_QUERY_LENGTH = 200
 SNIPPET_LENGTH = 200
+INDEX_POLL_SECONDS = int(os.getenv("INDEX_POLL_SECONDS", "30"))
+REINDEX_COOLDOWN_SECONDS = int(os.getenv("REINDEX_COOLDOWN_SECONDS", "300"))
+_REINDEX_COOLDOWN_KEY = "hn:reindex_cooldown"
+_LAST_INGEST_KEY = "hn:last_ingest_stats"
 
 
-# --- Pydantic models ---
+# ---------------------------------------------------------------------------
+# Index snapshot — one atomic unit
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IndexSnapshot:
+    stories: list
+    vectorizer: object
+    tfidf_matrix: object
+    vector_matrix: object
+    trie: object
+    version: int
+    doc_count: int
+    loaded_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# App state
+# ---------------------------------------------------------------------------
+
+_index: Optional[IndexSnapshot] = None
+_reload_lock = asyncio.Lock()
+_redis = None
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 class ResultItem(BaseModel):
     id: int
     title: str
     url: Optional[str] = None
     hn_url: str
-    score: float = Field(..., description="Relevance score rounded to 4 decimals")
+    score: float = PydanticField(..., description="Relevance score rounded to 4 decimals")
     snippet: str
 
 class SearchResponse(BaseModel):
@@ -65,31 +97,9 @@ class ZeroSearchItem(BaseModel):
     timestamp: Optional[str] = None
 
 
-# --- App setup ---
-
-app = FastAPI()
-
-_cors_origins = [
-    o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app_state = {
-    "stories": [],
-    "vectorizer": None,
-    "tfidf_matrix": None,
-    "vector_matrix": None,
-    "redis": None,
-    "trie": None,
-}
-
-
-# --- Helpers ---
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def make_snippet(text: str, title: str) -> str:
     body = text[len(title):].strip() if text.startswith(title) else text.strip()
@@ -116,53 +126,150 @@ async def _record_analytics(normalized_q: str, total: int) -> None:
         logger.warning("Analytics write failed: %s", e)
 
 
+# ---------------------------------------------------------------------------
+# Index loader
+# ---------------------------------------------------------------------------
+
 async def load_app_state_from_db() -> None:
-    """Load all stories from DB, rebuild indexes and trie. Thread-safe swap at the end."""
-    async with SessionLocal() as db:
-        result = await db.execute(select(Stories))
-        rows = result.scalars().all()
+    """Rebuild the index snapshot from DB. Atomic swap at the end."""
+    global _index
+    async with _reload_lock:
+        # Read version BEFORE querying DB — if another ingest lands while we load,
+        # the stored version will be older than Redis and the poller retriggers.
+        version = await get_index_version(_redis)
 
-    if not rows:
-        logger.info("No stories in DB — skipping index build")
-        return
+        try:
+            async with SessionLocal() as db:
+                result = await db.execute(select(Stories))
+                rows = result.scalars().all()
+        except Exception as e:
+            logger.error("DB read failed during index load: %s", e)
+            return  # keep serving old snapshot
 
-    stories = [
-        {
-            "id": s.id,
-            "title": s.title,
-            "text": clean_html(s.text),
-            "preprocessed_text": preprocess_text(clean_html(s.text)),
-            "url": s.url,
-            "score": s.score,
-        }
-        for s in rows
-    ]
+        if not rows:
+            logger.info("No stories in DB — skipping index build")
+            return
 
-    # Run heavy CPU work off the event loop
-    vectorizer, tfidf_matrix = await asyncio.to_thread(build_index, stories)
-    vector_matrix = await asyncio.to_thread(build_vector_index, stories)
+        stories = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "text": clean_html(s.text),
+                "preprocessed_text": preprocess_text(clean_html(s.text)),
+                "url": s.url,
+                "score": s.score,
+            }
+            for s in rows
+        ]
 
-    trie = Trie()
-    for story in stories:
-        for word in story["title"].lower().split():
-            trie.insert(word)
+        try:
+            vectorizer, tfidf_matrix = await asyncio.to_thread(build_index, stories)
+            vector_matrix = await asyncio.to_thread(build_vector_index, stories)
+        except Exception as e:
+            logger.error("Index build failed: %s", e)
+            return  # keep serving old snapshot
 
-    # Atomic swap — searches never see a half-built state
-    app_state["stories"] = stories
-    app_state["vectorizer"] = vectorizer
-    app_state["tfidf_matrix"] = tfidf_matrix
-    app_state["vector_matrix"] = vector_matrix
-    app_state["trie"] = trie
-    logger.info("Index loaded: %d stories", len(stories))
+        trie = Trie()
+        for story in stories:
+            for word in story["title"].lower().split():
+                trie.insert(word)
+
+        # Atomic swap
+        _index = IndexSnapshot(
+            stories=stories,
+            vectorizer=vectorizer,
+            tfidf_matrix=tfidf_matrix,
+            vector_matrix=vector_matrix,
+            trie=trie,
+            version=version,
+            doc_count=len(stories),
+        )
+        logger.info("Index loaded: %d stories at version %d", len(stories), version)
 
 
-# --- Middleware ---
+# ---------------------------------------------------------------------------
+# Background poller
+# ---------------------------------------------------------------------------
+
+async def _poll_index() -> None:
+    """Check Redis version every INDEX_POLL_SECONDS; reload if stale."""
+    while True:
+        try:
+            await asyncio.sleep(INDEX_POLL_SECONDS)
+            current_version = await get_index_version(_redis)
+            snap = _index
+            if snap is None or snap.version != current_version:
+                logger.info(
+                    "Index stale (snapshot=%s, redis=%s) — reloading",
+                    snap.version if snap else None,
+                    current_version,
+                )
+                await load_app_state_from_db()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("Poller error (will retry): %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _redis
+    _redis = get_redis()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    await load_app_state_from_db()
+
+    # Bootstrap: if DB is empty, enqueue a reindex
+    if _index is None:
+        logger.info("Empty DB on startup — enqueuing initial reindex")
+        from hn_search.tasks import reindex_stories
+        reindex_stories.delay()
+
+    poller = asyncio.create_task(_poll_index())
+
+    yield  # app runs here
+
+    poller.cancel()
+    try:
+        await poller
+    except asyncio.CancelledError:
+        pass
+    await _redis.aclose()
+    await engine.dispose()
+    logger.info("Shutdown complete")
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(lifespan=lifespan)
+
+_cors_origins = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Middleware
+# ---------------------------------------------------------------------------
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     try:
-        ip = request.client.host
-        allowed = await check_rate_limit(app_state["redis"], ip)
+        allowed = await check_rate_limit(_redis, request.client.host)
         if not allowed:
             return JSONResponse(
                 status_code=429,
@@ -173,25 +280,56 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# --- Startup ---
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
-@app.on_event("startup")
-async def startup():
-    app_state["redis"] = get_redis()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    await load_app_state_from_db()
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
-# --- Routes ---
+@app.get("/index/status")
+async def index_status():
+    import json
+    snap = _index
+    redis_version = await get_index_version(_redis)
+    last_stats = None
+    try:
+        raw = await _redis.get(_LAST_INGEST_KEY)
+        if raw:
+            last_stats = json.loads(raw)
+    except Exception:
+        pass
+    return {
+        "snapshot_version": snap.version if snap else None,
+        "doc_count": snap.doc_count if snap else 0,
+        "loaded_at": snap.loaded_at.isoformat() if snap else None,
+        "redis_version": redis_version,
+        "stale": (snap.version != redis_version) if snap else True,
+        "last_ingest": last_stats,
+    }
 
-@app.post("/index")
-async def post_index():
-    stats = await ingest_stories()
-    await load_app_state_from_db()
-    await bump_index_version(app_state["redis"])
-    logger.info("/index complete: %s", stats)
-    return {"message": f"Indexed {stats['fetched']} stories", "stats": stats}
+
+@app.post("/reindex", status_code=202)
+async def reindex():
+    from hn_search.tasks import reindex_stories
+    # Cooldown check
+    try:
+        ttl = await _redis.ttl(_REINDEX_COOLDOWN_KEY)
+        if ttl > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Recently refreshed. Try again in {ttl} seconds.",
+            )
+        await _redis.set(_REINDEX_COOLDOWN_KEY, "1", ex=REINDEX_COOLDOWN_SECONDS)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Cooldown check failed (proceeding): %s", e)
+
+    task = reindex_stories.delay()
+    return {"message": "Reindexing started", "task_id": task.id}
 
 
 @app.get("/search", response_model=SearchResponse)
@@ -207,26 +345,27 @@ async def search_query(
     if not nq:
         raise HTTPException(status_code=422, detail="q must not be blank")
 
-    if not app_state["stories"] or app_state["vectorizer"] is None:
-        raise HTTPException(status_code=503, detail="Index not ready. Call POST /index first.")
+    # Grab snapshot reference once — used for the entire request
+    snap = _index
+    if snap is None:
+        raise HTTPException(status_code=503, detail="Index not ready. Try again shortly.")
 
-    version = await get_index_version(app_state["redis"])
-    pool_key = build_pool_key(nq, version)
-    pool = await get_cached_pool(app_state["redis"], pool_key)
+    pool_key = build_pool_key(nq, snap.version)
+    pool = await get_cached_pool(_redis, pool_key)
     cache_status = "HIT"
 
     if pool is None:
         cache_status = "MISS"
         raw_pool = hybrid_search(
             nq,
-            app_state["stories"],
-            app_state["vectorizer"],
-            app_state["tfidf_matrix"],
-            app_state["vector_matrix"],
+            snap.stories,
+            snap.vectorizer,
+            snap.tfidf_matrix,
+            snap.vector_matrix,
             top_k=CANDIDATE_POOL_SIZE,
         )
         pool = [to_result_item(s) for s in raw_pool]
-        await set_cached_pool(app_state["redis"], pool_key, pool)
+        await set_cached_pool(_redis, pool_key, pool)
 
     total = len(pool)
     capped = total == CANDIDATE_POOL_SIZE
@@ -255,17 +394,12 @@ async def search_query(
     return resp
 
 
-@app.post("/reindex")
-async def reindex():
-    task = reindex_stories.delay()
-    return {"message": "Reindexing started in background", "task_id": task.id}
-
-
 @app.get("/autocomplete")
 async def autocomplete(q: str):
-    if app_state["trie"] is None:
+    snap = _index
+    if snap is None or snap.trie is None:
         return []
-    return app_state["trie"].search(q)
+    return snap.trie.search(q)
 
 
 @app.get("/analytics/top-searches", response_model=list[TopSearchItem])

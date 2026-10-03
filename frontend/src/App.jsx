@@ -60,12 +60,16 @@ export default function App() {
     setReindexMsg("");
     try {
       const data = await triggerReindex();
-      setReindexMsg(data.message || "Reindexing started!");
-    } catch {
-      setReindexMsg("Failed to connect.");
+      setReindexMsg("Reindexing started! Index will update in ~30s.");
+    } catch (err) {
+      if (err?.status === 429) {
+        setReindexMsg(err.detail || "Recently refreshed. Try again later.");
+      } else {
+        setReindexMsg("Failed to connect.");
+      }
     }
     setReindexing(false);
-    setTimeout(() => setReindexMsg(""), 4000);
+    setTimeout(() => setReindexMsg(""), 6000);
   };
 
   return (

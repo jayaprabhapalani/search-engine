@@ -10,6 +10,8 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS}
       - SQL_ECHO=${SQL_ECHO}
       - LOG_LEVEL=${LOG_LEVEL}
+      - INDEX_POLL_SECONDS=${INDEX_POLL_SECONDS}
+      - REINDEX_COOLDOWN_SECONDS=${REINDEX_COOLDOWN_SECONDS}
     depends_on:
       - postgres
       - redis

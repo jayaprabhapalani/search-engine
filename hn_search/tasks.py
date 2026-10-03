@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import os
+import time
 
 import redis as sync_redis
 from celery import Task
@@ -13,14 +15,23 @@ from hn_search.database import engine
 logger = logging.getLogger(__name__)
 
 _LOCK_KEY = "hn:ingest_lock"
-_LOCK_TTL = 360          # seconds — slightly longer than the soft time limit
-_SOFT_LIMIT = 300        # seconds
+_LOCK_TTL = 360
+_SOFT_LIMIT = 300
+_LAST_INGEST_KEY = "hn:last_ingest_stats"
 
 
 def _bump_index_version_sync() -> None:
     client = sync_redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
     try:
         client.incr(INDEX_VERSION_KEY)
+    finally:
+        client.close()
+
+
+def _write_ingest_stats_sync(stats: dict) -> None:
+    client = sync_redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+    try:
+        client.set(_LAST_INGEST_KEY, json.dumps(stats))
     finally:
         client.close()
 
@@ -46,7 +57,6 @@ async def _run_ingest() -> dict:
     try:
         return await ingest_stories()
     finally:
-        # Dispose the engine so the next asyncio.run() gets a fresh pool
         await engine.dispose()
 
 
@@ -62,9 +72,13 @@ def reindex_stories(self: Task) -> dict | str:
         logger.info("Reindex skipped — another run is in progress")
         return "skipped"
 
+    t0 = time.time()
     try:
         stats = asyncio.run(_run_ingest())
         _bump_index_version_sync()
+        stats["duration_seconds"] = round(time.time() - t0, 1)
+        stats["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_ingest_stats_sync(stats)
         logger.info("Reindex task complete: %s", stats)
         return stats
     except SoftTimeLimitExceeded:
