@@ -9,6 +9,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - CORS_ORIGINS=${CORS_ORIGINS}
       - SQL_ECHO=${SQL_ECHO}
+      - LOG_LEVEL=${LOG_LEVEL}
     depends_on:
       - postgres
       - redis

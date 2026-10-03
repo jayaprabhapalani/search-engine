@@ -34,7 +34,7 @@ const ResultCard = ({ story, index }) => {
         e.currentTarget.style.transform = "";
         e.currentTarget.style.boxShadow = "5px 5px 0 #1a1a2e";
       }}
-      onClick={() => story.url && window.open(story.url, "_blank")}
+      onClick={() => window.open(story.url || story.hn_url, "_blank")}
     >
       <div
         style={{

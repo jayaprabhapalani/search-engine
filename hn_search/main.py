@@ -1,29 +1,34 @@
-import os
-import math
+import asyncio
 import logging
-from fastapi import FastAPI, Depends, Request, Query, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, Response
+import math
+import os
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from typing import Optional
 
-from hn_search.crawler import fetch_all_stories
-from hn_search.preprocessor import preprocess_stories, preprocess_text
-from hn_search.search import build_index, build_vector_index, hybrid_search
-from hn_search.database import engine, Base, SessionLocal
-from hn_search.database import get_db
-from hn_search.models import Stories, SearchAnalytics
 from hn_search.cache import (
-    get_redis, get_cached_pool, set_cached_pool,
-    get_index_version, bump_index_version, build_pool_key,
+    build_pool_key, bump_index_version, get_cached_pool,
+    get_index_version, get_redis, set_cached_pool,
 )
+from hn_search.database import Base, SessionLocal, engine, get_db
+from hn_search.ingest import ingest_stories
+from hn_search.models import SearchAnalytics, Stories
+from hn_search.preprocessor import clean_html, preprocess_text
 from hn_search.ratelimiter import check_rate_limit
-from hn_search.trie import Trie
+from hn_search.search import build_index, build_vector_index, hybrid_search
 from hn_search.tasks import reindex_stories
+from hn_search.trie import Trie
 from hn_search.utils import normalize_query
 
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 CANDIDATE_POOL_SIZE = 50
@@ -32,12 +37,14 @@ MAX_PAGE_SIZE = 20
 MAX_QUERY_LENGTH = 200
 SNIPPET_LENGTH = 200
 
+
 # --- Pydantic models ---
 
 class ResultItem(BaseModel):
     id: int
     title: str
     url: Optional[str] = None
+    hn_url: str
     score: float = Field(..., description="Relevance score rounded to 4 decimals")
     snippet: str
 
@@ -85,7 +92,6 @@ app_state = {
 # --- Helpers ---
 
 def make_snippet(text: str, title: str) -> str:
-    """Strip the leading title from text and truncate to SNIPPET_LENGTH chars."""
     body = text[len(title):].strip() if text.startswith(title) else text.strip()
     return body[:SNIPPET_LENGTH] + ("…" if len(body) > SNIPPET_LENGTH else "")
 
@@ -95,6 +101,7 @@ def to_result_item(story: dict) -> dict:
         "id": story["id"],
         "title": story["title"],
         "url": story.get("url") or None,
+        "hn_url": f"https://news.ycombinator.com/item?id={story['id']}",
         "score": round(story["score"], 4),
         "snippet": make_snippet(story.get("text", ""), story.get("title", "")),
     }
@@ -109,6 +116,46 @@ async def _record_analytics(normalized_q: str, total: int) -> None:
         logger.warning("Analytics write failed: %s", e)
 
 
+async def load_app_state_from_db() -> None:
+    """Load all stories from DB, rebuild indexes and trie. Thread-safe swap at the end."""
+    async with SessionLocal() as db:
+        result = await db.execute(select(Stories))
+        rows = result.scalars().all()
+
+    if not rows:
+        logger.info("No stories in DB — skipping index build")
+        return
+
+    stories = [
+        {
+            "id": s.id,
+            "title": s.title,
+            "text": clean_html(s.text),
+            "preprocessed_text": preprocess_text(clean_html(s.text)),
+            "url": s.url,
+            "score": s.score,
+        }
+        for s in rows
+    ]
+
+    # Run heavy CPU work off the event loop
+    vectorizer, tfidf_matrix = await asyncio.to_thread(build_index, stories)
+    vector_matrix = await asyncio.to_thread(build_vector_index, stories)
+
+    trie = Trie()
+    for story in stories:
+        for word in story["title"].lower().split():
+            trie.insert(word)
+
+    # Atomic swap — searches never see a half-built state
+    app_state["stories"] = stories
+    app_state["vectorizer"] = vectorizer
+    app_state["tfidf_matrix"] = tfidf_matrix
+    app_state["vector_matrix"] = vector_matrix
+    app_state["trie"] = trie
+    logger.info("Index loaded: %d stories", len(stories))
+
+
 # --- Middleware ---
 
 @app.middleware("http")
@@ -117,7 +164,10 @@ async def rate_limit_middleware(request: Request, call_next):
         ip = request.client.host
         allowed = await check_rate_limit(app_state["redis"], ip)
         if not allowed:
-            return JSONResponse(status_code=429, content={"error": "Too many requests. Please slow down!"})
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests. Please slow down!"},
+            )
     except Exception as e:
         logger.warning("Rate limiter error (fail-open): %s", e)
     return await call_next(request)
@@ -130,63 +180,18 @@ async def startup():
     app_state["redis"] = get_redis()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-    async with SessionLocal() as db:
-        result = await db.execute(select(Stories))
-        stories = result.scalars().all()
-        if stories:
-            app_state["stories"] = [
-                {"id": s.id, "title": s.title, "text": s.text,
-                 "preprocessed_text": preprocess_text(s.text),  # recompute — never stale
-                 "url": s.url, "score": s.score}
-                for s in stories
-            ]
-
-        if app_state["stories"]:
-            vectorizer, tfidf_matrix = build_index(app_state["stories"])
-            app_state["vectorizer"] = vectorizer
-            app_state["tfidf_matrix"] = tfidf_matrix
-            app_state["vector_matrix"] = build_vector_index(app_state["stories"])
-
-        trie = Trie()
-        for story in stories:
-            for word in story.title.lower().split():
-                trie.insert(word)
-        app_state["trie"] = trie
+    await load_app_state_from_db()
 
 
 # --- Routes ---
 
 @app.post("/index")
-async def post_query(db: AsyncSession = Depends(get_db)):
-    stories = await fetch_all_stories()
-    preprocessed_stories = preprocess_stories(stories)
-    for story in preprocessed_stories:
-        result = await db.execute(select(Stories).where(Stories.id == story["id"]))
-        if not result.scalar_one_or_none():
-            db.add(Stories(
-                id=story["id"], title=story["title"], text=story["text"],
-                preprocessed_text=story["preprocessed_text"],
-                url=story["url"], score=story["score"],
-            ))
-    await db.commit()
-
-    # Invalidate cache without touching rate-limit keys
+async def post_index():
+    stats = await ingest_stories()
+    await load_app_state_from_db()
     await bump_index_version(app_state["redis"])
-
-    vectorizer, tfidf_matrix = build_index(preprocessed_stories)
-    app_state["stories"] = preprocessed_stories
-    app_state["vectorizer"] = vectorizer
-    app_state["tfidf_matrix"] = tfidf_matrix
-    app_state["vector_matrix"] = build_vector_index(stories)
-
-    trie = Trie()
-    for story in stories:
-        for word in story["title"].lower().split():
-            trie.insert(word)
-    app_state["trie"] = trie
-
-    return {"message": f"Indexed {len(preprocessed_stories)} stories"}
+    logger.info("/index complete: %s", stats)
+    return {"message": f"Indexed {stats['fetched']} stories", "stats": stats}
 
 
 @app.get("/search", response_model=SearchResponse)
@@ -207,7 +212,6 @@ async def search_query(
 
     version = await get_index_version(app_state["redis"])
     pool_key = build_pool_key(nq, version)
-
     pool = await get_cached_pool(app_state["redis"], pool_key)
     cache_status = "HIT"
 
@@ -228,41 +232,33 @@ async def search_query(
     capped = total == CANDIDATE_POOL_SIZE
     total_pages = math.ceil(total / page_size) if total > 0 else 0
 
-    # Analytics on page 1 only (hits and misses), using normalized query
     if page == 1:
         background_tasks.add_task(_record_analytics, nq, total)
 
     if total > 0 and page > total_pages:
-        response_body = SearchResponse(
+        body = SearchResponse(
             results=[], page=page, page_size=page_size,
             total=total, total_pages=total_pages, capped=capped,
         )
-        resp = Response(
-            content=response_body.model_dump_json(),
-            media_type="application/json",
-        )
+        resp = Response(content=body.model_dump_json(), media_type="application/json")
         resp.headers["X-Cache"] = cache_status
         return resp
 
     start = (page - 1) * page_size
-    paginated = pool[start: start + page_size]
-
-    response_body = SearchResponse(
-        results=paginated, page=page, page_size=page_size,
+    body = SearchResponse(
+        results=pool[start: start + page_size],
+        page=page, page_size=page_size,
         total=total, total_pages=total_pages, capped=capped,
     )
-    resp = Response(
-        content=response_body.model_dump_json(),
-        media_type="application/json",
-    )
+    resp = Response(content=body.model_dump_json(), media_type="application/json")
     resp.headers["X-Cache"] = cache_status
     return resp
 
 
 @app.post("/reindex")
 async def reindex():
-    reindex_stories.delay()
-    return {"message": "Reindexing started in background"}
+    task = reindex_stories.delay()
+    return {"message": "Reindexing started in background", "task_id": task.id}
 
 
 @app.get("/autocomplete")
