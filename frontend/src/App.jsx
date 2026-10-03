@@ -22,6 +22,7 @@ export default function App() {
     page,
     totalPages,
     total,
+    capped,
     displayedQ,
     search,
     handlePageChange,
@@ -116,6 +117,7 @@ export default function App() {
             page={page}
             totalPages={totalPages}
             total={total}
+            capped={capped}
             displayedQ={displayedQ}
             onPageChange={(p) => handlePageChange(displayedQ, p)}
           />

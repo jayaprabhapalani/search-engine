@@ -1,9 +1,6 @@
 const Pagination = ({ page, totalPages, onPage }) => {
   if (totalPages <= 1) return null;
 
-  const pages = [];
-  for (let i = 1; i <= Math.min(totalPages, 5); i++) pages.push(i);
-
   const BtnStyle = (active, disabled) => ({
     width: 36,
     height: 36,
@@ -20,39 +17,47 @@ const Pagination = ({ page, totalPages, onPage }) => {
     transition: "all 0.1s",
   });
 
+  // Build the page number sequence with ellipsis markers
+  const buildPages = () => {
+    const pages = [];
+    const addPage = (n) => { if (!pages.includes(n)) pages.push(n); };
+
+    addPage(1);
+    for (let i = Math.max(2, page - 2); i <= Math.min(totalPages - 1, page + 2); i++) {
+      addPage(i);
+    }
+    addPage(totalPages);
+
+    // Insert "..." where there are gaps
+    const result = [];
+    for (let i = 0; i < pages.length; i++) {
+      if (i > 0 && pages[i] - pages[i - 1] > 1) result.push("...");
+      result.push(pages[i]);
+    }
+    return result;
+  };
+
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 8,
-        marginTop: 28,
-        justifyContent: "center",
-        flexWrap: "wrap",
-      }}
-    >
-      <div
-        onClick={() => page > 1 && onPage(page - 1)}
-        style={BtnStyle(false, page === 1)}
-      >
+    <div style={{ display: "flex", gap: 8, marginTop: 28, justifyContent: "center", flexWrap: "wrap" }}>
+      <div onClick={() => page > 1 && onPage(page - 1)} style={BtnStyle(false, page === 1)}>
         ‹
       </div>
 
-      {pages.map((p) => (
-        <div
-          key={p}
-          onClick={() => onPage(p)}
-          style={BtnStyle(p === page, false)}
-        >
-          {p}
-        </div>
-      ))}
+      {buildPages().map((p, i) =>
+        p === "..." ? (
+          <div key={`ellipsis-${i}`} style={BtnStyle(false, true)}>...</div>
+        ) : (
+          <div
+            key={p}
+            onClick={() => p !== page && onPage(p)}
+            style={BtnStyle(p === page, false)}
+          >
+            {p}
+          </div>
+        )
+      )}
 
-      {totalPages > 5 && <div style={BtnStyle(false, true)}>...</div>}
-
-      <div
-        onClick={() => page < totalPages && onPage(page + 1)}
-        style={BtnStyle(false, page === totalPages)}
-      >
+      <div onClick={() => page < totalPages && onPage(page + 1)} style={BtnStyle(false, page === totalPages)}>
         ›
       </div>
     </div>

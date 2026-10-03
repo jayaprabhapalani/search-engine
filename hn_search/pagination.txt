@@ -1,17 +1,32 @@
-page=1, page_size=5
-→ top_k = 1*5 = 5
-→ hybrid_search returns 5 results
-→ slice [0:5] → all 5 results
-→ page 1 done ✅
+Pagination strategy (updated Task 2)
+======================================
 
-page=2, page_size=5
-→ top_k = 2*5 = 10
-→ hybrid_search returns 10 results
-→ slice [5:10] → last 5 results
-→ page 2 done ✅
+Fixed-pool approach
+-------------------
+hybrid_search() is called once per query with top_k = CANDIDATE_POOL_SIZE (50).
+It returns the full relevant pool — not one page.
 
-page=3, page_size=5
-→ top_k = 3*5 = 15
-→ hybrid_search returns 15 results
-→ slice [10:15] → last 5 results
-→ page 3 done ✅
+The /search route slices the pool per page:
+  start = (page - 1) * page_size
+  end   = start + page_size
+
+total      = len(pool)  — true count after the relevance cutoff
+total_pages = ceil(total / page_size), or 0 when total is 0
+capped      = True when pool is full (real match count may exceed 50)
+
+Relevance cutoff
+----------------
+Candidates where tfidf_score == 0 AND vector_score < MIN_VECTOR_SCORE (0.30)
+are dropped before slicing. This prevents zero-score documents from inflating
+total and ensures nonsense queries return total=0.
+
+Analytics
+---------
+SearchAnalytics is written only on page == 1 to prevent page-click inflation.
+The recorded results_count is the true pool size after the cutoff.
+
+Retriever depth
+---------------
+Both TF-IDF and vector retrievers fetch top_k = CANDIDATE_POOL_SIZE candidates
+so the union can fill all 50 slots. The old hardcoded depth of 20 capped the
+union at ~40 and made pages beyond 8 impossible.

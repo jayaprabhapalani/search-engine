@@ -18,6 +18,7 @@ const ResultsPage = ({
   page,
   totalPages,
   total,
+  capped,
   displayedQ,
   onPageChange,
 }) => (
@@ -60,12 +61,12 @@ const ResultsPage = ({
         ✓
       </span>
       <span>
-        <span style={{ color: "#1a1a2e" }}>{total}</span> results for "
+        <span style={{ color: "#1a1a2e" }}>{capped ? "50+" : total}</span> results for "
         <span style={{ color: "#e63946" }}>{displayedQ}</span>"
       </span>
-      <PixelBadge color="#ffd166">
-        PAGE {page}/{totalPages}
-      </PixelBadge>
+      {total > 0 && (
+        <PixelBadge color="#ffd166">PAGE {page}/{totalPages}</PixelBadge>
+      )}
       <PixelBadge color="#2ec4b6">HYBRID</PixelBadge>
     </div>
 

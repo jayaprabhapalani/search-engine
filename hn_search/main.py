@@ -1,22 +1,25 @@
 import os
-from fastapi import FastAPI,Depends,Request
+import math
+from fastapi import FastAPI, Depends, Request, Query, HTTPException
 from fastapi.responses import JSONResponse
 from hn_search.crawler import fetch_all_stories
 from hn_search.preprocessor import preprocess_stories
-from hn_search.search import build_index,search,build_vector_index,hybrid_search
-from hn_search.database import engine,Base,SessionLocal
+from hn_search.search import build_index, build_vector_index, hybrid_search
+from hn_search.database import engine, Base, SessionLocal
 from sqlalchemy.ext.asyncio import AsyncSession
 from hn_search.database import get_db
-from hn_search.models import Stories,SearchAnalytics
-from sqlalchemy import select
-from hn_search.cache import get_cached_result,get_redis,set_cached_result
+from hn_search.models import Stories, SearchAnalytics
+from sqlalchemy import select, func
+from hn_search.cache import get_cached_result, get_redis, set_cached_result
 from hn_search.ratelimiter import check_rate_limit
-import math
 from hn_search.trie import Trie
-import re
-from sqlalchemy import func
 from hn_search.tasks import reindex_stories
 from fastapi.middleware.cors import CORSMiddleware
+
+CANDIDATE_POOL_SIZE = 50
+DEFAULT_PAGE_SIZE = 5
+MAX_PAGE_SIZE = 20
+MAX_QUERY_LENGTH = 200
 
 app = FastAPI()
 
@@ -141,45 +144,60 @@ async def post_query(db:AsyncSession=Depends(get_db)):
 
 
 @app.get("/search")
-async def search_query(q:str,page:int=1,page_size:int=5,db:AsyncSession=Depends(get_db)):
-    #for pagination
-    top_k=page*page_size
-    
-    cached_result=await get_cached_result(app_state["redis"],q,page,page_size)
-    if cached_result:
-        return cached_result
-    
-    result=hybrid_search(q,app_state["stories"],app_state["vectorizer"],app_state["tfidf_matrix"],app_state["vector_matrix"],top_k=top_k)
-    
-    #page calculation
-    total=len(result)
-    total_pages=math.ceil(total/page_size)
-    
-    #store the searched data and result cnt in search analytics
-    search_analytics=SearchAnalytics(query=q,results_count=total)
-    db.add(search_analytics)
-    await db.commit()
-     
-    #for pagination
-    start=(page-1)*page_size
-    end=start+page_size
-    paginated=result[start:end]
-    
-    await set_cached_result(app_state["redis"],q,page,page_size,{
+async def search_query(
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY_LENGTH),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    db: AsyncSession = Depends(get_db),
+):
+    q = q.strip()
+    if not q:
+        raise HTTPException(status_code=422, detail="q must not be blank")
+
+    # 503 if index not ready
+    if not app_state["stories"] or app_state["vectorizer"] is None:
+        raise HTTPException(status_code=503, detail="Index not ready. Call POST /index first.")
+
+    cached = await get_cached_result(app_state["redis"], q, page, page_size)
+    if cached:
+        return cached
+
+    pool = hybrid_search(
+        q,
+        app_state["stories"],
+        app_state["vectorizer"],
+        app_state["tfidf_matrix"],
+        app_state["vector_matrix"],
+        top_k=CANDIDATE_POOL_SIZE,
+    )
+
+    total = len(pool)
+    capped = total == CANDIDATE_POOL_SIZE
+    total_pages = math.ceil(total / page_size) if total > 0 else 0
+
+    # Log analytics only on page 1 (prevents inflation from paging)
+    if page == 1:
+        db.add(SearchAnalytics(query=q, results_count=total))
+        await db.commit()
+
+    # Out-of-range page
+    if total > 0 and page > total_pages:
+        return {"results": [], "page": page, "page_size": page_size,
+                "total": total, "total_pages": total_pages, "capped": capped}
+
+    start = (page - 1) * page_size
+    paginated = pool[start: start + page_size]
+
+    payload = {
         "results": paginated,
         "page": page,
+        "page_size": page_size,
+        "total": total,
         "total_pages": total_pages,
-        "total": total
-    })
-    
-    return {
-        "results":paginated,
-        "page":page,
-        "page_size":page_size,
-        "total":total,
-        "total_pages":total_pages
-        
+        "capped": capped,
     }
+    await set_cached_result(app_state["redis"], q, page, page_size, payload)
+    return payload
 
 
 @app.post("/reindex")
