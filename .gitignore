@@ -117,7 +117,7 @@ ipython_config.py
 __pypackages__/
 
 # Celery stuff
-celerybeat-schedule
+celerybeat-schedule*
 celerybeat.pid
 
 # SageMath parsed files
@@ -125,6 +125,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -174,13 +176,19 @@ poetry.toml
 pyrightconfig.json
 
 ### react ###
+.DS_Store
 .DS_*
 logs
 **/*.backup.*
 **/*.back.*
 
-node_modules
+node_modules/
 bower_components
+frontend/.env.local
+
+# Editor
+.vscode/
+.idea/
 
 *.sublime*
 

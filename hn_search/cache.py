@@ -7,10 +7,12 @@ import json
 
 load_dotenv()
 
-REDIS_URL=os.getenv("REDIS_URL")
-CACHE_TTL_SECONDS=1800 #half-an hour
+REDIS_URL = os.getenv("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL environment variable is not set")
+CACHE_TTL_SECONDS = 1800  # half-an hour
 
-def get_redis()->Redis:
+def get_redis() -> Redis:
     return redis.from_url(REDIS_URL,encoding="utf-8",decode_responses=True)
 
 # Checks if a cached result exists for this query

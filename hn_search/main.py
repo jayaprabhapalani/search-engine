@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI,Depends,Request
 from fastapi.responses import JSONResponse
 from hn_search.crawler import fetch_all_stories
@@ -17,11 +18,14 @@ from sqlalchemy import func
 from hn_search.tasks import reindex_stories
 from fastapi.middleware.cors import CORSMiddleware
 
-app=FastAPI()
+app = FastAPI()
 
+_cors_origins = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -2,3 +2,8 @@ venv/
 .env
 __pycache__/
 *.pyc
+.git/
+frontend/
+node_modules/
+celerybeat-schedule*
+.vscode/

@@ -1,14 +1,14 @@
-version: "3.9"
-
 services:
   app:
     build: .
     ports:
       - "8000:8000"
-    environment:
-      - HACKERNEWS_BASE_URL=https://hacker-news.firebaseio.com/v0/
-      - DATABASE_URL=postgresql+asyncpg://postgres:prabha@postgres:5432/hn_search
+    environment: &common_env
+      - HACKERNEWS_BASE_URL=${HACKERNEWS_BASE_URL}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - SQL_ECHO=${SQL_ECHO}
     depends_on:
       - postgres
       - redis
@@ -18,9 +18,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=prabha
-      - POSTGRES_DB=hn_search
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -34,10 +34,7 @@ services:
   celery_worker:
     build: .
     command: celery -A hn_search.celery_app worker --loglevel=info
-    environment:
-      - HACKERNEWS_BASE_URL=https://hacker-news.firebaseio.com/v0/
-      - DATABASE_URL=postgresql+asyncpg://postgres:prabha@postgres:5432/hn_search
-      - REDIS_URL=redis://redis:6379
+    environment: *common_env
     depends_on:
       - postgres
       - redis
@@ -46,11 +43,8 @@ services:
 
   celery_beat:
     build: .
-    command: celery -A hn_search.celery_app beat --loglevel=info
-    environment:
-      - HACKERNEWS_BASE_URL=https://hacker-news.firebaseio.com/v0/
-      - DATABASE_URL=postgresql+asyncpg://postgres:prabha@postgres:5432/hn_search
-      - REDIS_URL=redis://redis:6379
+    command: celery -A hn_search.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    environment: *common_env
     depends_on:
       - postgres
       - redis
