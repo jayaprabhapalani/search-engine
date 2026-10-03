@@ -21,12 +21,11 @@ _LIMITS = httpx.Limits(max_connections=30, max_keepalive_connections=20)
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Response:
-    """GET with exponential backoff. Raises on persistent failure."""
     for attempt in range(_MAX_RETRIES):
         try:
             resp = await client.get(url)
             if resp.status_code == 404:
-                resp.raise_for_status()          # don't retry 404
+                resp.raise_for_status()
             if resp.status_code in (429,) or resp.status_code >= 500:
                 retry_after = float(resp.headers.get("Retry-After", 0))
                 wait = max(retry_after, (2 ** attempt) + random.uniform(0, 1))
@@ -43,6 +42,13 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Response
         except httpx.HTTPStatusError:
             raise
     raise RuntimeError(f"Exhausted retries for {url}")
+
+
+async def fetch_feed_ids(feed: str) -> list[int]:
+    """Return the full list of story IDs for a named feed."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT, limits=_LIMITS, follow_redirects=True) as client:
+        resp = await _get_with_retry(client, f"{BASE_URL}{feed}.json")
+        return list(dict.fromkeys(resp.json()))  # dedupe, preserve order
 
 
 async def _fetch_item(
@@ -81,21 +87,11 @@ async def _fetch_item(
         }
 
 
-async def fetch_all_stories(
-    limit: int = 200,
-    feed: str = "topstories",
-) -> tuple[list[dict], dict]:
-    """
-    Fetch up to `limit` stories from the given feed.
-    Returns (stories, stats) where stats has keys:
-      requested, fetched, skipped, failed
-    """
+async def fetch_stories_by_ids(ids: list[int]) -> tuple[list[dict], dict]:
+    """Fetch story details for a list of IDs. Returns (stories, stats)."""
     async with httpx.AsyncClient(
         timeout=_TIMEOUT, limits=_LIMITS, follow_redirects=True
     ) as client:
-        resp = await _get_with_retry(client, f"{BASE_URL}{feed}.json")
-        ids = list(dict.fromkeys(resp.json()[:limit]))   # dedupe, preserve order
-
         sem = asyncio.Semaphore(_CONCURRENCY)
         results = await asyncio.gather(
             *[_fetch_item(client, sem, id_) for id_ in ids],
@@ -103,15 +99,20 @@ async def fetch_all_stories(
         )
 
     stories = [r for r in results if r is not None]
-    failed = sum(1 for r in results if r is None) - (len(ids) - len(results) - len(stories))
-    # None can mean skipped (deleted/dead/job) or failed — both are counted as skipped for simplicity
-    skipped = len(ids) - len(stories)
-
     stats = {
         "requested": len(ids),
         "fetched": len(stories),
-        "skipped": skipped,
-        "failed": 0,   # individual failures are folded into skipped; hard failures raise
+        "skipped": len(ids) - len(stories),
+        "failed": 0,
     }
     logger.info("Crawl complete: %s", stats)
     return stories, stats
+
+
+# Kept for backwards compatibility (tests, etc.)
+async def fetch_all_stories(
+    limit: int = 200,
+    feed: str = "topstories",
+) -> tuple[list[dict], dict]:
+    ids = (await fetch_feed_ids(feed))[:limit]
+    return await fetch_stories_by_ids(ids)

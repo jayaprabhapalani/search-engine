@@ -10,8 +10,22 @@ const TAG_COLORS = [
 ];
 const getTagColor = (i) => TAG_COLORS[i % TAG_COLORS.length];
 
+const fmt = (iso) => {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return null;
+  }
+};
+
 const ResultCard = ({ story, index }) => {
-  const score = story.score ? (story.score * 100).toFixed(1) : null;
+  const relevance = story.relevance != null ? (story.relevance * 100).toFixed(1) : null;
+  const date = fmt(story.created_at);
 
   return (
     <div
@@ -36,6 +50,7 @@ const ResultCard = ({ story, index }) => {
       }}
       onClick={() => window.open(story.url || story.hn_url, "_blank")}
     >
+      {/* Badge row */}
       <div
         style={{
           display: "flex",
@@ -46,8 +61,30 @@ const ResultCard = ({ story, index }) => {
         }}
       >
         <PixelBadge color={getTagColor(index)}>HN</PixelBadge>
-        {score && <PixelBadge color="#ffd166">SCORE {score}%</PixelBadge>}
+        {relevance && <PixelBadge color="#ffd166">SCORE {relevance}%</PixelBadge>}
+        {story.points > 0 && (
+          <PixelBadge color="#f4a261">▲ {story.points}</PixelBadge>
+        )}
+        {story.descendants > 0 && (
+          <PixelBadge color="#a8dadc">💬 {story.descendants}</PixelBadge>
+        )}
+        {story.domain && (
+          <PixelBadge color="#457b9d">{story.domain}</PixelBadge>
+        )}
+        {date && (
+          <span
+            style={{
+              fontFamily: "'VT323'",
+              fontSize: "14px",
+              color: "#aaa",
+            }}
+          >
+            {date}
+          </span>
+        )}
       </div>
+
+      {/* Title */}
       <div
         style={{
           fontFamily: "'Press Start 2P'",
@@ -59,6 +96,8 @@ const ResultCard = ({ story, index }) => {
       >
         {story.title}
       </div>
+
+      {/* URL */}
       {story.url && (
         <div
           style={{
@@ -74,7 +113,9 @@ const ResultCard = ({ story, index }) => {
           {story.url}
         </div>
       )}
-      {story.text && story.text !== story.title && (
+
+      {/* Snippet */}
+      {story.snippet && (
         <div
           style={{
             fontFamily: "'VT323'",
@@ -84,8 +125,7 @@ const ResultCard = ({ story, index }) => {
             opacity: 0.8,
           }}
         >
-          {story.text.slice(0, 160)}
-          {story.text.length > 160 ? "..." : ""}
+          {story.snippet}
         </div>
       )}
     </div>

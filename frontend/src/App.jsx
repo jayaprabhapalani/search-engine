@@ -6,7 +6,7 @@ import ResultsPage from "./pages/ResultsPage";
 import AnalyticsPage from "./components/analytics/AnalyticsPage";
 import { useSearch } from "./hooks/useSearch";
 import { useAutocomplete } from "./hooks/useAutocomplete";
-import { triggerReindex } from "./services/api";
+import { triggerReindex, getIndexStatus } from "./services/api";
 import "./styles/global.css";
 
 export default function App() {
@@ -59,17 +59,52 @@ export default function App() {
     setReindexing(true);
     setReindexMsg("");
     try {
-      const data = await triggerReindex();
-      setReindexMsg("Reindexing started! Index will update in ~30s.");
+      await triggerReindex();
+      setReindexMsg("Reindexing started…");
+
+      // Capture current version, then poll until it changes
+      let baseVersion = null;
+      try {
+        const status = await getIndexStatus();
+        baseVersion = status.snapshot_version;
+      } catch {}
+
+      const poll = setInterval(async () => {
+        try {
+          const status = await getIndexStatus();
+          if (baseVersion === null || status.snapshot_version !== baseVersion) {
+            clearInterval(poll);
+            setReindexMsg("Index updated ✓");
+            setReindexing(false);
+            setTimeout(() => setReindexMsg(""), 5000);
+          }
+        } catch {
+          // Redis/API blip — keep polling
+        }
+      }, 3000);
+
+      // Safety timeout: stop polling after 3 minutes
+      setTimeout(() => {
+        clearInterval(poll);
+        setReindexing(false);
+        setReindexMsg((m) => m === "Reindexing started…" ? "Reindex triggered — check back shortly." : m);
+      }, 180_000);
+
+      return; // don't hit the setReindexing(false) below
     } catch (err) {
       if (err?.status === 429) {
-        setReindexMsg(err.detail || "Recently refreshed. Try again later.");
+        const secs = err.detail?.match(/(\d+) seconds/)?.[1];
+        const mins = secs ? Math.ceil(secs / 60) : null;
+        setReindexMsg(mins
+          ? `Recently refreshed. Try again in ${mins} minute${mins > 1 ? "s" : ""}.`
+          : err.detail || "Recently refreshed. Try again later."
+        );
       } else {
         setReindexMsg("Failed to connect.");
       }
+      setReindexing(false);
+      setTimeout(() => setReindexMsg(""), 6000);
     }
-    setReindexing(false);
-    setTimeout(() => setReindexMsg(""), 6000);
   };
 
   return (

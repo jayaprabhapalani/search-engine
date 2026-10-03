@@ -19,7 +19,7 @@ services:
       - hn_network
 
   postgres:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -47,6 +47,16 @@ services:
   celery_beat:
     build: .
     command: celery -A hn_search.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    environment: *common_env
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - hn_network
+
+  celery_embeddings:
+    build: .
+    command: celery -A hn_search.celery_app worker --loglevel=info -Q embeddings --concurrency=1 --prefetch-multiplier=1
     environment: *common_env
     depends_on:
       - postgres

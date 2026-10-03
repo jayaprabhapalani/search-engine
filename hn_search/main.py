@@ -7,22 +7,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hn_search.cache import (
     build_pool_key, bump_index_version, get_cached_pool,
     get_index_version, get_redis, set_cached_pool,
 )
-from hn_search.database import Base, SessionLocal, engine, get_db
-from hn_search.models import SearchAnalytics, Stories
+from hn_search.database import SessionLocal, engine, get_db, init_pgvector
+from hn_search.embeddings import EMBEDDING_MODEL
+from hn_search.models import Chunk, ChunkEmbedding, SearchAnalytics, Stories
 from hn_search.preprocessor import clean_html, preprocess_text
 from hn_search.ratelimiter import check_rate_limit
-from hn_search.search import build_index, build_vector_index, hybrid_search
+from hn_search.search import build_index, hybrid_search
 from hn_search.trie import Trie
 from hn_search.utils import normalize_query
 
@@ -36,7 +38,6 @@ CANDIDATE_POOL_SIZE = 50
 DEFAULT_PAGE_SIZE = 5
 MAX_PAGE_SIZE = 20
 MAX_QUERY_LENGTH = 200
-SNIPPET_LENGTH = 200
 INDEX_POLL_SECONDS = int(os.getenv("INDEX_POLL_SECONDS", "30"))
 REINDEX_COOLDOWN_SECONDS = int(os.getenv("REINDEX_COOLDOWN_SECONDS", "300"))
 _REINDEX_COOLDOWN_KEY = "hn:reindex_cooldown"
@@ -44,18 +45,22 @@ _LAST_INGEST_KEY = "hn:last_ingest_stats"
 
 
 # ---------------------------------------------------------------------------
-# Index snapshot — one atomic unit
+# Index snapshot
 # ---------------------------------------------------------------------------
 
 @dataclass
 class IndexSnapshot:
-    stories: list
+    chunks: list           # all chunks (keyword search)
+    vec_chunks: list       # subset with embeddings: [{chunk_id, chunk}]
+    vector_matrix: Optional[np.ndarray]  # (len(vec_chunks), 384) float32
+    story_map: dict        # story_id -> story_meta dict
     vectorizer: object
     tfidf_matrix: object
-    vector_matrix: object
     trie: object
     version: int
     doc_count: int
+    chunk_count: int
+    embedded_count: int
     loaded_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
@@ -77,7 +82,11 @@ class ResultItem(BaseModel):
     title: str
     url: Optional[str] = None
     hn_url: str
-    score: float = PydanticField(..., description="Relevance score rounded to 4 decimals")
+    relevance: float = PydanticField(..., description="Relevance score rounded to 4 decimals")
+    points: int = 0
+    domain: Optional[str] = None
+    descendants: int = 0
+    created_at: Optional[str] = None
     snippet: str
 
 class SearchResponse(BaseModel):
@@ -101,19 +110,19 @@ class ZeroSearchItem(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_snippet(text: str, title: str) -> str:
-    body = text[len(title):].strip() if text.startswith(title) else text.strip()
-    return body[:SNIPPET_LENGTH] + ("…" if len(body) > SNIPPET_LENGTH else "")
-
-
 def to_result_item(story: dict) -> dict:
+    ca = story.get("created_at")
     return {
         "id": story["id"],
         "title": story["title"],
         "url": story.get("url") or None,
         "hn_url": f"https://news.ycombinator.com/item?id={story['id']}",
-        "score": round(story["score"], 4),
-        "snippet": make_snippet(story.get("text", ""), story.get("title", "")),
+        "relevance": story["relevance"],
+        "points": story.get("points") or 0,
+        "domain": story.get("domain"),
+        "descendants": story.get("descendants") or 0,
+        "created_at": ca.isoformat() if hasattr(ca, "isoformat") else ca,
+        "snippet": story.get("snippet", ""),
     }
 
 
@@ -130,61 +139,133 @@ async def _record_analytics(normalized_q: str, total: int) -> None:
 # Index loader
 # ---------------------------------------------------------------------------
 
+async def _build_snapshot(version: int) -> Optional[IndexSnapshot]:
+    """Read stories, chunks, and embeddings from DB. Returns None if no data."""
+    async with SessionLocal() as db:
+        story_rows = (await db.execute(select(Stories))).scalars().all()
+        chunk_rows = (await db.execute(
+            select(Chunk).order_by(Chunk.story_id, Chunk.chunk_index)
+        )).scalars().all()
+        # Read embeddings for current model
+        emb_rows = (await db.execute(
+            select(ChunkEmbedding.chunk_id, ChunkEmbedding.embedding)
+            .where(ChunkEmbedding.model == EMBEDDING_MODEL)
+        )).all()
+
+    if not story_rows:
+        return None
+
+    story_map: dict[int, dict] = {
+        s.id: {
+            "id": s.id,
+            "title": s.title or "",
+            "url": s.url,
+            "domain": s.domain,
+            "points": s.score or 0,
+            "descendants": s.descendants or 0,
+            "created_at": s.created_at,
+        }
+        for s in story_rows
+    }
+
+    # Build embedding lookup: chunk_id -> vector
+    emb_map: dict[int, list] = {cid: vec for cid, vec in emb_rows}
+
+    chunks: list[dict] = []
+    chunked_stories: set[int] = set()
+    for c in chunk_rows:
+        meta = story_map.get(c.story_id)
+        if meta is None:
+            continue
+        chunked_stories.add(c.story_id)
+        chunks.append({
+            "chunk_id": c.id,
+            "story_id": c.story_id,
+            "chunk_index": c.chunk_index,
+            "chunk_text": c.text,
+            "preprocessed_text": preprocess_text(c.text),
+            "title": meta["title"],
+            "story_meta": meta,
+        })
+
+    # Fallback for stories with no chunks yet
+    for s in story_rows:
+        if s.id in chunked_stories:
+            continue
+        raw = clean_html(s.text or "")
+        fallback_text = ((s.title or "") + " " + raw).strip()
+        chunks.append({
+            "chunk_id": None,
+            "story_id": s.id,
+            "chunk_index": 0,
+            "chunk_text": fallback_text,
+            "preprocessed_text": preprocess_text(fallback_text),
+            "title": s.title or "",
+            "story_meta": story_map[s.id],
+        })
+
+    if not chunks:
+        return None
+
+    # Build vector matrix from DB embeddings (only chunks that have one)
+    vec_chunks: list[dict] = []
+    vec_list: list = []
+    for c in chunks:
+        cid = c["chunk_id"]
+        if cid is not None and cid in emb_map:
+            vec_chunks.append({"chunk_id": cid, "chunk": c})
+            vec_list.append(emb_map[cid])
+
+    vector_matrix: Optional[np.ndarray] = None
+    if vec_list:
+        vector_matrix = np.array(vec_list, dtype=np.float32)
+
+    # CPU-bound: build TF-IDF in a thread so we don't block the event loop
+    vectorizer, tfidf_matrix = await asyncio.to_thread(build_index, chunks)
+
+    trie = Trie()
+    for meta in story_map.values():
+        for word in meta["title"].lower().split():
+            trie.insert(word)
+
+    return IndexSnapshot(
+        chunks=chunks,
+        vec_chunks=vec_chunks,
+        vector_matrix=vector_matrix,
+        story_map=story_map,
+        vectorizer=vectorizer,
+        tfidf_matrix=tfidf_matrix,
+        trie=trie,
+        version=version,
+        doc_count=len(story_map),
+        chunk_count=len(chunks),
+        embedded_count=len(vec_chunks),
+    )
+
+
 async def load_app_state_from_db() -> None:
     """Rebuild the index snapshot from DB. Atomic swap at the end."""
     global _index
     async with _reload_lock:
-        # Read version BEFORE querying DB — if another ingest lands while we load,
-        # the stored version will be older than Redis and the poller retriggers.
         version = await get_index_version(_redis)
-
         try:
-            async with SessionLocal() as db:
-                result = await db.execute(select(Stories))
-                rows = result.scalars().all()
-        except Exception as e:
-            logger.error("DB read failed during index load: %s", e)
-            return  # keep serving old snapshot
-
-        if not rows:
-            logger.info("No stories in DB — skipping index build")
-            return
-
-        stories = [
-            {
-                "id": s.id,
-                "title": s.title,
-                "text": clean_html(s.text),
-                "preprocessed_text": preprocess_text(clean_html(s.text)),
-                "url": s.url,
-                "score": s.score,
-            }
-            for s in rows
-        ]
-
-        try:
-            vectorizer, tfidf_matrix = await asyncio.to_thread(build_index, stories)
-            vector_matrix = await asyncio.to_thread(build_vector_index, stories)
+            snapshot = await _build_snapshot(version)
         except Exception as e:
             logger.error("Index build failed: %s", e)
-            return  # keep serving old snapshot
+            return
+        if snapshot is not None:
+            _index = snapshot
+            logger.info(
+                "Index loaded: %d stories, %d chunks, %d embedded at version %d",
+                snapshot.doc_count, snapshot.chunk_count, snapshot.embedded_count, version,
+            )
+        else:
+            logger.info("No stories in DB — skipping index build")
 
-        trie = Trie()
-        for story in stories:
-            for word in story["title"].lower().split():
-                trie.insert(word)
 
-        # Atomic swap
-        _index = IndexSnapshot(
-            stories=stories,
-            vectorizer=vectorizer,
-            tfidf_matrix=tfidf_matrix,
-            vector_matrix=vector_matrix,
-            trie=trie,
-            version=version,
-            doc_count=len(stories),
-        )
-        logger.info("Index loaded: %d stories at version %d", len(stories), version)
+def _build_snapshot_sync(version: int) -> Optional[IndexSnapshot]:
+    """Synchronous wrapper so we can run _build_snapshot in a thread."""
+    return asyncio.run(_build_snapshot(version))
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +273,6 @@ async def load_app_state_from_db() -> None:
 # ---------------------------------------------------------------------------
 
 async def _poll_index() -> None:
-    """Check Redis version every INDEX_POLL_SECONDS; reload if stale."""
     while True:
         try:
             await asyncio.sleep(INDEX_POLL_SECONDS)
@@ -220,12 +300,9 @@ async def lifespan(app: FastAPI):
     global _redis
     _redis = get_redis()
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    await init_pgvector()
     await load_app_state_from_db()
 
-    # Bootstrap: if DB is empty, enqueue a reindex
     if _index is None:
         logger.info("Empty DB on startup — enqueuing initial reindex")
         from hn_search.tasks import reindex_stories
@@ -233,7 +310,7 @@ async def lifespan(app: FastAPI):
 
     poller = asyncio.create_task(_poll_index())
 
-    yield  # app runs here
+    yield
 
     poller.cancel()
     try:
@@ -301,9 +378,18 @@ async def index_status():
             last_stats = json.loads(raw)
     except Exception:
         pass
+
+    chunk_count = snap.chunk_count if snap else 0
+    embedded_count = snap.embedded_count if snap else 0
+    coverage = round(embedded_count / chunk_count * 100, 1) if chunk_count > 0 else 0.0
+
     return {
         "snapshot_version": snap.version if snap else None,
         "doc_count": snap.doc_count if snap else 0,
+        "chunk_count": chunk_count,
+        "embedded_count": embedded_count,
+        "embedding_coverage_pct": coverage,
+        "embedding_model": EMBEDDING_MODEL,
         "loaded_at": snap.loaded_at.isoformat() if snap else None,
         "redis_version": redis_version,
         "stale": (snap.version != redis_version) if snap else True,
@@ -314,7 +400,6 @@ async def index_status():
 @app.post("/reindex", status_code=202)
 async def reindex():
     from hn_search.tasks import reindex_stories
-    # Cooldown check
     try:
         ttl = await _redis.ttl(_REINDEX_COOLDOWN_KEY)
         if ttl > 0:
@@ -345,7 +430,6 @@ async def search_query(
     if not nq:
         raise HTTPException(status_code=422, detail="q must not be blank")
 
-    # Grab snapshot reference once — used for the entire request
     snap = _index
     if snap is None:
         raise HTTPException(status_code=503, detail="Index not ready. Try again shortly.")
@@ -356,13 +440,15 @@ async def search_query(
 
     if pool is None:
         cache_status = "MISS"
-        raw_pool = hybrid_search(
+        raw_pool = await asyncio.to_thread(
+            hybrid_search,
             nq,
-            snap.stories,
+            snap.chunks,
             snap.vectorizer,
             snap.tfidf_matrix,
             snap.vector_matrix,
-            top_k=CANDIDATE_POOL_SIZE,
+            snap.vec_chunks,
+            CANDIDATE_POOL_SIZE,
         )
         pool = [to_result_item(s) for s in raw_pool]
         await set_cached_pool(_redis, pool_key, pool)

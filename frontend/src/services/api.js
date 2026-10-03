@@ -32,6 +32,12 @@ export const getZeroResults = async () => {
   return res.json();
 };
 
+export const getIndexStatus = async () => {
+  const res = await fetch(`${BASE_URL}/index/status`);
+  if (!res.ok) throw new Error("Status check failed");
+  return res.json();
+};
+
 export const triggerReindex = async () => {
   const res = await fetch(`${BASE_URL}/reindex`, { method: "POST" });
   if (!res.ok) {
