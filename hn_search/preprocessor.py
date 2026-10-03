@@ -36,7 +36,8 @@ _PROTECTED_RE = re.compile(
     "|".join(re.escape(k) for k in sorted(_PROTECTED, key=len, reverse=True))
 )
 # anything*.js  →  *js  (node.js→nodejs, next.js→nextjs)
-_DOTJS_RE = re.compile(r"(\w+)\.js\b")
+# Must match word boundary so it doesn't eat mid-word dots
+_DOTJS_RE = re.compile(r"\b(\w+)\.js\b")
 # URL pattern
 _URL_RE = re.compile(r"https?://\S+")
 # HN prefixes to strip
@@ -58,7 +59,12 @@ def clean_html(raw: str | None) -> str:
     if not raw:
         return ""
     soup = BeautifulSoup(raw, "html.parser")
-    # get_text with separator so tags don't glue words together
+    # Extract URLs from href/src so hostnames survive tag stripping
+    for tag in soup.find_all(True):
+        for attr in ("href", "src"):
+            val = tag.get(attr, "")
+            if val.startswith("http"):
+                tag.insert_after(soup.new_string(" " + val + " "))
     text = soup.get_text(separator=" ")
     return _WS_RE.sub(" ", text).strip()
 
@@ -107,7 +113,7 @@ def tokenize(text: str) -> list[str]:
     for tok in tokens:
         if tok in _STOP_WORDS:
             continue
-        if tok.isascii() and not any(c.isdigit() for c in tok):
+        if tok.isascii() and not any(c.isdigit() for c in tok) and not tok.endswith("js"):
             tok = _stem(tok)
         result.append(tok)
 
